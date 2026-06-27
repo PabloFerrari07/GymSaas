@@ -18,11 +18,12 @@ def whatsapp_webhook(request):
     Recibe eventos del servicio de WhatsApp (Node + Baileys).
     Autenticado por token compartido en el header X-Internal-Token.
 
-    Eventos soportados:
+    Ciclo de vida de un mensaje:
+      1. message_sent      → Baileys confirmó envío; puebla NotificationLog.whatsapp_message_id
+                             correlacionando por job_id.
+      2. message_delivered → WhatsApp confirmó entrega al dispositivo; pone delivered=True
+                             correlacionando por whatsapp_message_id.
       - session_connected / session_disconnected → actualiza WhatsAppSession.status
-      - message_delivered → marca NotificationLog.delivered = True
-        (requiere que NotificationLog.whatsapp_message_id esté poblado —
-        ver docs/ARCHITECTURE.md, sección "Pendiente del lado de Node")
     """
     token = request.headers.get("X-Internal-Token", "")
     if not settings.WHATSAPP_SHARED_TOKEN or token != settings.WHATSAPP_SHARED_TOKEN:
@@ -42,6 +43,8 @@ def whatsapp_webhook(request):
 
     if event in ("session_connected", "session_disconnected"):
         _handle_session_event(tenant_id, event)
+    elif event == "message_sent":
+        _handle_message_sent(tenant_id, data)
     elif event == "message_delivered":
         _handle_message_delivered(tenant_id, data)
     else:
@@ -69,6 +72,30 @@ def _handle_session_event(tenant_id, event):
             "Webhook: no se encontró WhatsAppSession para tenant_id=%s (evento=%s)",
             tenant_id,
             event,
+        )
+
+
+def _handle_message_sent(tenant_id, data):
+    job_id = data.get("job_id")
+    whatsapp_message_id = data.get("whatsapp_message_id")
+    if not job_id or not whatsapp_message_id:
+        logger.warning(
+            "Webhook: message_sent con datos incompletos (tenant=%s, data=%s)",
+            tenant_id,
+            data,
+        )
+        return
+
+    updated = NotificationLog.objects.filter(
+        job_id=job_id,
+        member__tenant_id=tenant_id,
+    ).update(whatsapp_message_id=whatsapp_message_id)
+
+    if not updated:
+        logger.warning(
+            "Webhook: no se encontró NotificationLog con job_id=%s (tenant=%s)",
+            job_id,
+            tenant_id,
         )
 
 

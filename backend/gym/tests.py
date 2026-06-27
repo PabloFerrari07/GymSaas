@@ -118,6 +118,38 @@ class WhatsAppWebhookTest(TestCase):
         log.refresh_from_db()
         self.assertTrue(log.delivered)
 
+    def test_message_sent_puebla_whatsapp_message_id(self):
+        plan = SubscriptionPlan.objects.create(
+            tenant=self.tenant, name="Mensual", duration_days=30, price=5000
+        )
+        member = Member.objects.create(
+            tenant=self.tenant,
+            first_name="Carlos",
+            last_name="López",
+            phone="33333333",
+            current_plan=plan,
+            start_date=date(2026, 1, 1),
+        )
+        log = NotificationLog.objects.create(
+            member=member,
+            type=NotificationLog.TYPE_DUE_SOON,
+            job_id="job-abc123",
+        )
+        self.assertEqual(log.whatsapp_message_id, "")
+
+        resp = self._post(
+            {
+                "tenant_id": str(self.tenant.id),
+                "event": "message_sent",
+                "data": {"job_id": "job-abc123", "whatsapp_message_id": "WA-SENT-999"},
+            }
+        )
+        self.assertEqual(resp.status_code, 200)
+        log.refresh_from_db()
+        self.assertEqual(log.whatsapp_message_id, "WA-SENT-999")
+        # delivered aún debe ser False — message_sent no lo activa
+        self.assertFalse(log.delivered)
+
     def test_evento_desconocido_devuelve_200(self):
         resp = self._post({"tenant_id": str(self.tenant.id), "event": "future_event"})
         self.assertEqual(resp.status_code, 200)

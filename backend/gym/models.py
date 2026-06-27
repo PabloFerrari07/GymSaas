@@ -161,6 +161,9 @@ class NotificationLog(models.Model):
     sent_at = models.DateTimeField(auto_now_add=True)
     delivered = models.BooleanField(default=False)
     whatsapp_message_id = models.CharField(max_length=200, blank=True)
+    # Identificador de job devuelto por el servicio de Node al encolar el envío.
+    # Permite correlacionar el evento message_sent con este registro.
+    job_id = models.CharField(max_length=100, blank=True, db_index=True)
 
     def __str__(self):
         return f"{self.type} — {self.member} — {self.sent_at.date()}"
