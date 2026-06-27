@@ -30,6 +30,7 @@ def check_subscriptions():
             member=member,
             type=NotificationLog.TYPE_DUE_TODAY,
             sent_at__date=today,
+            job_id__gt="",
         ).exists()
 
         if already_notified:

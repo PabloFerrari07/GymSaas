@@ -290,15 +290,35 @@ class CheckSubscriptionsTest(TestCase):
     def test_ya_notificado_hoy_no_duplica(self, mock_send):
         today = timezone.localdate()
         member = self._make_member(due_date=today)
-        # Simular notificacion previa del mismo dia
+        # Simular notificacion exitosa previa del mismo dia (job_id no vacio)
         NotificationLog.objects.create(
             member=member,
             type=NotificationLog.TYPE_DUE_TODAY,
+            job_id="job-previo-exitoso",
         )
 
         check_subscriptions()
 
         mock_send.assert_not_called()
+
+    @patch(
+        "gym.tasks.send_whatsapp_message",
+        return_value={"ok": True, "job_id": "job-reintento", "data": {}},
+    )
+    def test_log_fallido_hoy_permite_reintento(self, mock_send):
+        today = timezone.localdate()
+        member = self._make_member(due_date=today)
+        # Log de hoy con job_id vacio = envio fallido → no debe bloquear el reintento
+        NotificationLog.objects.create(
+            member=member,
+            type=NotificationLog.TYPE_DUE_TODAY,
+            job_id="",
+        )
+
+        check_subscriptions()
+
+        # El job debe intentar notificar de nuevo (socio + admin)
+        self.assertEqual(mock_send.call_count, 2)
 
     @patch(
         "gym.tasks.send_whatsapp_message",
