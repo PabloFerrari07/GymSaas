@@ -1,6 +1,15 @@
-import makeWASocket, { useMultiFileAuthState, DisconnectReason } from '@whiskeysockets/baileys'
+import makeWASocket, {
+  useMultiFileAuthState,
+  DisconnectReason,
+  fetchLatestBaileysVersion,
+  Browsers,
+} from '@whiskeysockets/baileys'
 import pino from 'pino'
 import { notifyDjango } from './webhook.js'
+
+// Versión conocida como funcional (issue #2370 del repo oficial de Baileys).
+// Se usa como fallback si fetchLatestBaileysVersion() falla.
+const FALLBACK_VERSION = [2, 3000, 1033893291]
 
 // tenant_id → { sock, status: 'pending_qr'|'connected'|'disconnected', qr: string|null }
 const sessions = new Map()
@@ -25,11 +34,21 @@ export async function startSession(tenantId) {
 
   const { state, saveCreds } = await useMultiFileAuthState(`/app/sessions/${tenantId}`)
 
+  let version
+  try {
+    ;({ version } = await fetchLatestBaileysVersion())
+    console.log(`[${tenantId}] Versión de protocolo WA obtenida: ${version}`)
+  } catch {
+    version = FALLBACK_VERSION
+    console.warn(`[${tenantId}] fetchLatestBaileysVersion falló, usando fallback: ${version}`)
+  }
+
   const sock = makeWASocket({
+    version,
     auth: state,
     logger: silentLogger,
     printQRInTerminal: false,
-    browser: ['GymSaaS', 'Chrome', '1.0.0'],
+    browser: Browsers.ubuntu('Chrome'),
   })
   entry.sock = sock
 
