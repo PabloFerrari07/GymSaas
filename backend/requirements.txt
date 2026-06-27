@@ -1,8 +1,9 @@
-Django==4.2.16
-djangorestframework==3.15.2
+Django==5.2.15
+djangorestframework==3.16.1
 celery==5.3.6
-django-celery-beat==2.6.0
+django-celery-beat==2.9.0
 python-decouple==3.8
 redis==5.0.1
 psycopg2-binary==2.9.12
-requests==2.32.3
+requests==2.33.0
+mercadopago==3.2.0

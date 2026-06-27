@@ -61,6 +61,7 @@ class PaymentAdmin(admin.ModelAdmin):
         "amount",
         "provider",
         "status",
+        "payment_link",
         "created_at",
         "paid_at",
     )
