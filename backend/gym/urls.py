@@ -1,5 +1,7 @@
-from django.urls import path, include
+from django.urls import path
+
+from . import views
 
 urlpatterns = [
-    # API endpoints will be added here as the project grows
+    path("webhooks/whatsapp/", views.whatsapp_webhook, name="whatsapp_webhook"),
 ]

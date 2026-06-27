@@ -114,6 +114,10 @@ CELERY_BROKER_URL = config('REDIS_URL', default='redis://localhost:6379/0')
 CELERY_RESULT_BACKEND = config('REDIS_URL', default='redis://localhost:6379/0')
 CELERY_BEAT_SCHEDULER = 'django_celery_beat.schedulers:DatabaseScheduler'
 
+# Servicio de WhatsApp (Node + Baileys)
+WHATSAPP_SERVICE_URL = config('WHATSAPP_SERVICE_URL', default='http://whatsapp:3000')
+WHATSAPP_SHARED_TOKEN = config('WHATSAPP_SHARED_TOKEN', default='')
+
 
 # Django REST Framework
 REST_FRAMEWORK = {
