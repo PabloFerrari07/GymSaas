@@ -12,7 +12,13 @@ def send_whatsapp_message(tenant_id: int | str, phone: str, message: str) -> dic
     """
     Encola un mensaje en el servicio de WhatsApp (Node + Baileys).
 
-    Devuelve {'ok': True, 'data': {...}} o {'ok': False, 'error': '<razón>'}.
+    Retorno exitoso:  {'ok': True,  'job_id': '<id>', 'data': {...}}
+    Retorno fallido:  {'ok': False, 'error': '<razón>'}
+
+    job_id es el identificador que Node devuelve al encolar. El caller (Celery task)
+    debe guardarlo en NotificationLog.job_id para poder correlacionar el webhook
+    message_sent que llega después con el whatsapp_message_id real de Baileys.
+
     Nunca lanza excepción — es seguro llamar desde tareas de Celery.
 
     Args:
@@ -29,7 +35,8 @@ def send_whatsapp_message(tenant_id: int | str, phone: str, message: str) -> dic
             timeout=_TIMEOUT,
         )
         resp.raise_for_status()
-        return {"ok": True, "data": resp.json()}
+        data = resp.json()
+        return {"ok": True, "job_id": data.get("job_id", ""), "data": data}
     except requests.exceptions.ConnectionError as exc:
         logger.error("WhatsApp service unreachable (url=%s): %s", url, exc)
         return {"ok": False, "error": "connection_error"}

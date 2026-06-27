@@ -1,6 +1,8 @@
 import json
 from datetime import date
+from unittest.mock import MagicMock, patch
 
+import requests as requests_lib
 from django.contrib.auth.models import User
 from django.test import TestCase, override_settings
 
@@ -11,6 +13,7 @@ from gym.models import (
     Tenant,
     WhatsAppSession,
 )
+from gym.services.whatsapp_client import send_whatsapp_message
 
 WEBHOOK_URL = "/api/webhooks/whatsapp/"
 TEST_TOKEN = "test-token-secreto"
@@ -162,3 +165,56 @@ class WhatsAppWebhookTest(TestCase):
             HTTP_X_INTERNAL_TOKEN=TEST_TOKEN,
         )
         self.assertEqual(resp.status_code, 400)
+
+
+@override_settings(
+    WHATSAPP_SERVICE_URL="http://whatsapp:3000",
+    WHATSAPP_SHARED_TOKEN="test-token",
+)
+class SendWhatsAppMessageTest(TestCase):
+    """
+    Verifica el contrato de send_whatsapp_message():
+    - job_id viaja al nivel raíz del resultado exitoso
+    - errores de red devuelven ok=False sin lanzar excepción
+    """
+
+    _NODE_RESPONSE = {"status": "queued", "job_id": "1-1749000000000-abc123"}
+
+    def _mock_post(self, json_data=None, exc=None):
+        if exc:
+            return patch("gym.services.whatsapp_client.requests.post", side_effect=exc)
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = json_data or self._NODE_RESPONSE
+        mock_resp.raise_for_status.return_value = None
+        return patch(
+            "gym.services.whatsapp_client.requests.post", return_value=mock_resp
+        )
+
+    def test_retorna_ok_y_job_id_en_nivel_raiz(self):
+        with self._mock_post() as mock_post:
+            result = send_whatsapp_message("1", "5491112345678", "Hola")
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["job_id"], "1-1749000000000-abc123")
+        self.assertIn("data", result)
+        mock_post.assert_called_once_with(
+            "http://whatsapp:3000/send-message",
+            json={"tenant_id": "1", "phone": "5491112345678", "message": "Hola"},
+            headers={"X-Internal-Token": "test-token"},
+            timeout=5,
+        )
+
+    def test_connection_error_devuelve_ok_false_sin_excepcion(self):
+        with self._mock_post(exc=requests_lib.exceptions.ConnectionError()):
+            result = send_whatsapp_message("1", "5491112345678", "Hola")
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"], "connection_error")
+        self.assertNotIn("job_id", result)
+
+    def test_timeout_devuelve_ok_false_sin_excepcion(self):
+        with self._mock_post(exc=requests_lib.exceptions.Timeout()):
+            result = send_whatsapp_message("1", "5491112345678", "Hola")
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"], "timeout")
