@@ -1,5 +1,7 @@
 import { getSession } from './sessions.js'
+import { notifyDjango } from './webhook.js'
 
+// tenant_id debe ser siempre el Tenant.pk de Django (entero como string).
 // tenant_id → Array<{ jobId, phone, message, retries }>
 const queues = new Map()
 // tenant_ids actualmente procesando (para evitar dobles consumidores)
@@ -52,8 +54,20 @@ async function processQueue(tenantId) {
 
     try {
       const jid = `${job.phone}@s.whatsapp.net`
-      await sock.sendMessage(jid, { text: job.message })
-      console.log(`[queue] ✓ Enviado a ${job.phone} (tenant=${tenantId}, job=${job.jobId})`)
+      const sent = await sock.sendMessage(jid, { text: job.message })
+      const waId = sent?.key?.id ?? ''
+      console.log(`[queue] ✓ Enviado a ${job.phone} (tenant=${tenantId}, job=${job.jobId}, wa_id=${waId})`)
+
+      if (waId) {
+        // Fire-and-forget: no bloqueamos la cola esperando la confirmación de Django
+        notifyDjango(tenantId, 'message_sent', {
+          job_id: job.jobId,
+          whatsapp_message_id: waId,
+        }).catch(err =>
+          console.error(`[queue] Error notificando message_sent (job=${job.jobId}): ${err.message}`)
+        )
+      }
+
       queue.shift()
     } catch (err) {
       job.retries++
