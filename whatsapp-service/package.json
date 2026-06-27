@@ -1,0 +1,19 @@
+{
+  "name": "whatsapp-service",
+  "version": "1.0.0",
+  "description": "Servicio de envío de mensajes WhatsApp para GymSaaS",
+  "type": "module",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "nodemon src/index.js"
+  },
+  "dependencies": {
+    "@whiskeysockets/baileys": "^6.7.9",
+    "express": "^4.19.2",
+    "pino": "^9.5.0",
+    "qrcode": "^1.5.4"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.4"
+  }
+}
