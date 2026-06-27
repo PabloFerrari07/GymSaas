@@ -5,6 +5,7 @@ from unittest.mock import MagicMock, patch
 import requests as requests_lib
 from django.contrib.auth.models import User
 from django.test import TestCase, override_settings
+from django.utils import timezone
 
 from gym.models import (
     Member,
@@ -14,6 +15,7 @@ from gym.models import (
     WhatsAppSession,
 )
 from gym.services.whatsapp_client import send_whatsapp_message
+from gym.tasks import check_subscriptions
 
 WEBHOOK_URL = "/api/webhooks/whatsapp/"
 TEST_TOKEN = "test-token-secreto"
@@ -218,3 +220,117 @@ class SendWhatsAppMessageTest(TestCase):
 
         self.assertFalse(result["ok"])
         self.assertEqual(result["error"], "timeout")
+
+
+class CheckSubscriptionsTest(TestCase):
+    """
+    Tests para el job check_subscriptions.
+    send_whatsapp_message se mockea para no depender del servicio Node.
+    """
+
+    def setUp(self):
+        owner = User.objects.create_user(username="owner_gym", password="pass")
+        self.tenant = Tenant.objects.create(
+            name="Gym Test",
+            owner=owner,
+            admin_phone="5491100000000",
+        )
+        self.plan = SubscriptionPlan.objects.create(
+            tenant=self.tenant,
+            name="Mensual",
+            duration_days=30,
+            price=5000,
+        )
+
+    def _make_member(self, due_date, phone="5491199999999", first_name="Juan"):
+        return Member.objects.create(
+            tenant=self.tenant,
+            first_name=first_name,
+            last_name="Perez",
+            phone=phone,
+            current_plan=self.plan,
+            start_date=date(2026, 1, 1),
+            due_date=due_date,
+        )
+
+    @patch(
+        "gym.tasks.send_whatsapp_message",
+        return_value={"ok": True, "job_id": "job-test-1", "data": {}},
+    )
+    def test_vencimiento_hoy_genera_2_envios_y_2_logs(self, mock_send):
+        today = timezone.localdate()
+        member = self._make_member(due_date=today)
+
+        check_subscriptions()
+
+        self.assertEqual(mock_send.call_count, 2)
+        logs = NotificationLog.objects.filter(
+            member=member, type=NotificationLog.TYPE_DUE_TODAY
+        )
+        self.assertEqual(logs.count(), 2)
+        # Ambos logs tienen el job_id correcto
+        self.assertTrue(all(log.job_id == "job-test-1" for log in logs))
+
+    @patch(
+        "gym.tasks.send_whatsapp_message",
+        return_value={"ok": True, "job_id": "job-test-2", "data": {}},
+    )
+    def test_vencimiento_otro_dia_no_genera_envios(self, mock_send):
+        self._make_member(due_date=date(2025, 6, 1))
+
+        check_subscriptions()
+
+        mock_send.assert_not_called()
+        self.assertEqual(NotificationLog.objects.count(), 0)
+
+    @patch(
+        "gym.tasks.send_whatsapp_message",
+        return_value={"ok": True, "job_id": "job-test-3", "data": {}},
+    )
+    def test_ya_notificado_hoy_no_duplica(self, mock_send):
+        today = timezone.localdate()
+        member = self._make_member(due_date=today)
+        # Simular notificacion previa del mismo dia
+        NotificationLog.objects.create(
+            member=member,
+            type=NotificationLog.TYPE_DUE_TODAY,
+        )
+
+        check_subscriptions()
+
+        mock_send.assert_not_called()
+
+    @patch(
+        "gym.tasks.send_whatsapp_message",
+        return_value={"ok": False, "error": "connection_error"},
+    )
+    def test_fallo_whatsapp_no_crashea_y_crea_logs(self, mock_send):
+        today = timezone.localdate()
+        member = self._make_member(due_date=today)
+
+        # No debe lanzar excepcion
+        check_subscriptions()
+
+        # Se llama 2 veces (socio + admin), falla las 2, pero los logs igual se crean
+        self.assertEqual(mock_send.call_count, 2)
+        logs = NotificationLog.objects.filter(
+            member=member, type=NotificationLog.TYPE_DUE_TODAY
+        )
+        self.assertEqual(logs.count(), 2)
+        self.assertTrue(all(log.job_id == "" for log in logs))
+
+    @patch(
+        "gym.tasks.send_whatsapp_message",
+        return_value={"ok": True, "job_id": "job-test-5", "data": {}},
+    )
+    def test_sin_admin_phone_solo_1_envio_al_socio(self, mock_send):
+        today = timezone.localdate()
+        self.tenant.admin_phone = ""
+        self.tenant.save()
+        member = self._make_member(due_date=today)
+
+        check_subscriptions()
+
+        # Solo se notifica al socio, no al admin
+        self.assertEqual(mock_send.call_count, 1)
+        self.assertEqual(NotificationLog.objects.filter(member=member).count(), 1)

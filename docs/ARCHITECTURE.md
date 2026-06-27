@@ -19,6 +19,7 @@ No van en el mismo proceso. Baileys mantiene un socket persistente por sesión a
 ```
 Tenant (Gym)
   - name, owner (FK User), plan_saas, is_active, created_at
+  - admin_phone (CharField, blank) — WhatsApp del admin para notificaciones internas
 
 WhatsAppSession
   - tenant (FK OneToOne)
@@ -46,19 +47,23 @@ Payment   # cobro generado para un socio
 
 NotificationLog
   - member (FK)
-  - type: due_soon | expired | payment_confirmed
+  - type: due_soon | due_today | expired | payment_confirmed
   - sent_at, delivered (bool), whatsapp_message_id
+  - job_id (CharField, db_index) — correlaciona con el job_id del servicio Node
 ```
 
 ## Flujo diario (Celery Beat)
 
-Task `check_subscriptions` corre una vez al día:
-1. Busca `Member` con `due_date` en ventana configurada (ej. -1 día / hoy / +3 días).
-2. Por cada uno:
-   - Genera `Payment` con link de pago (Mercado Pago o Stripe).
-   - POST al servicio Node: enviar WhatsApp al socio (aviso + link).
-   - POST al servicio Node: enviar WhatsApp al admin del tenant (aviso interno).
-   - Registra todo en `NotificationLog`.
+Task `check_subscriptions` corre 2 veces al día (09:00 y 18:00 UTC, vía Celery Beat):
+1. Busca `Member` con `due_date == hoy` y `tenant__is_active=True`.
+2. Omite socios que ya tengan un `NotificationLog(type='due_today')` del mismo día (idempotencia).
+3. Por cada socio sin notificar:
+   - Envía WhatsApp al socio avisando el vencimiento (`send_whatsapp_message`).
+   - Envía WhatsApp al admin del tenant (`Tenant.admin_phone`) con el nombre del socio.
+   - Registra ambos envíos en `NotificationLog(type='due_today')` con el `job_id` devuelto por Node.
+4. Un fallo de envío individual (WhatsApp caído, etc.) no interrumpe el batch — se loguea y continúa.
+
+Nota: el link de pago se agrega en la próxima iteración (integración Mercado Pago / Stripe).
 
 ## Webhooks
 
@@ -101,6 +106,7 @@ Eventos implementados en Django:
 |---|---|
 | `session_connected` | `WhatsAppSession.status = connected` |
 | `session_disconnected` | `WhatsAppSession.status = disconnected` |
+| `message_sent` | `NotificationLog.whatsapp_message_id = data.whatsapp_message_id` (por `job_id`) |
 | `message_delivered` | `NotificationLog.delivered = True` (por `whatsapp_message_id`) |
 
 ### ⚠️ Convención crítica: tenant_id
@@ -108,21 +114,23 @@ Node usa `tenant_id` como string opaco. **Debe ser siempre el `Tenant.pk` de Dja
 representado como string), no un slug ni nombre. Si se usa cualquier otro valor, el webhook de
 Django no puede hacer el lookup en base de datos y loguea un warning silencioso.
 
-### Pendiente del lado de Node para cerrar message_delivered
+### Estado de implementación: message_sent y correlación de mensajes
 
-Hoy `queue.js` envía el mensaje con `sock.sendMessage(jid, { text })` pero **no reporta el
-`whatsapp_message_id` asignado por Baileys a Django**. `sendMessage` devuelve el mensaje
-con su clave/ID, que es lo que luego llega en el evento `messages.update`.
+Django ya maneja el evento `message_sent` (implementado en `feat/django-whatsapp-communication`):
+cuando Node reporta `{ event: "message_sent", data: { job_id, whatsapp_message_id } }`,
+Django actualiza `NotificationLog.whatsapp_message_id` para el log con ese `job_id`.
 
-Para que `message_delivered` pueda correlacionarse con un `NotificationLog` específico, Node
-necesita:
-1. Capturar el ID de mensaje retornado por `sock.sendMessage()` en `queue.js`.
-2. Llamar a Django (o incluirlo en la respuesta al encolado) para que Django guarde ese ID
-   en `NotificationLog.whatsapp_message_id` al momento del envío.
+El flujo completo de correlación es:
+1. Django llama a Node con `POST /send-message` → Node devuelve `{ job_id }`.
+2. Django guarda `job_id` en `NotificationLog.job_id`.
+3. Node envía el mensaje y reporta `message_sent` a Django con `{ job_id, whatsapp_message_id }`.
+4. Django actualiza `NotificationLog.whatsapp_message_id` usando el `job_id` como clave.
+5. Al llegar `message_delivered`, Django busca por `whatsapp_message_id` y marca `delivered=True`.
 
-Hasta que esto esté implementado, el evento `message_delivered` llega correctamente a Django
-pero no actualiza ningún registro (el `filter()` no encuentra coincidencias). Los demás
-eventos (`session_connected`, `session_disconnected`) funcionan sin dependencia de esto.
+Para que el paso 3 funcione, Node debe capturar el ID retornado por `sock.sendMessage()` en `queue.js`
+y llamar al webhook de Django. Hasta que Node implemente eso, `message_delivered` llega pero no
+actualiza ningún registro. Los eventos `session_connected` y `session_disconnected` funcionan sin
+dependencia de esto.
 
 ## Próximos pasos técnicos (orden sugerido)
 1. Modelos Django + admin básico. ✓

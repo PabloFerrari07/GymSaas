@@ -15,6 +15,11 @@ class Tenant(models.Model):
     plan_saas = models.CharField(max_length=20, choices=PLAN_CHOICES, default=PLAN_FREE)
     is_active = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
+    admin_phone = models.CharField(
+        max_length=30,
+        blank=True,
+        help_text="Número WhatsApp del admin para notificaciones internas (ej. 5491112345678)",
+    )
 
     def __str__(self):
         return self.name
@@ -146,10 +151,12 @@ class Payment(models.Model):
 
 class NotificationLog(models.Model):
     TYPE_DUE_SOON = "due_soon"
+    TYPE_DUE_TODAY = "due_today"
     TYPE_EXPIRED = "expired"
     TYPE_PAYMENT_CONFIRMED = "payment_confirmed"
     TYPE_CHOICES = [
         (TYPE_DUE_SOON, "Due Soon"),
+        (TYPE_DUE_TODAY, "Due Today"),
         (TYPE_EXPIRED, "Expired"),
         (TYPE_PAYMENT_CONFIRMED, "Payment Confirmed"),
     ]
