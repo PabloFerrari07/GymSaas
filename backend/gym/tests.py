@@ -1,5 +1,6 @@
 import json
-from datetime import date
+from datetime import date, timedelta
+from decimal import Decimal
 from unittest.mock import MagicMock, patch
 
 import requests as requests_lib
@@ -10,10 +11,12 @@ from django.utils import timezone
 from gym.models import (
     Member,
     NotificationLog,
+    Payment,
     SubscriptionPlan,
     Tenant,
     WhatsAppSession,
 )
+from gym.services.mercadopago_client import create_payment_preference, get_payment_info
 from gym.services.whatsapp_client import send_whatsapp_message
 from gym.tasks import check_subscriptions
 
@@ -354,3 +357,197 @@ class CheckSubscriptionsTest(TestCase):
         # Solo se notifica al socio, no al admin
         self.assertEqual(mock_send.call_count, 1)
         self.assertEqual(NotificationLog.objects.filter(member=member).count(), 1)
+
+
+@override_settings(MERCADOPAGO_ACCESS_TOKEN="TEST-fake-token")
+class MercadoPagoClientTest(TestCase):
+    def setUp(self):
+        owner = User.objects.create_user(username="mp_owner", password="pass")
+        self.tenant = Tenant.objects.create(name="Gym MP", owner=owner)
+        self.plan = SubscriptionPlan.objects.create(
+            tenant=self.tenant,
+            name="Mensual",
+            duration_days=30,
+            price=Decimal("5000.00"),
+        )
+        self.member = Member.objects.create(
+            tenant=self.tenant,
+            first_name="Ana",
+            last_name="Lopez",
+            phone="5491188888888",
+            current_plan=self.plan,
+            start_date=date(2026, 1, 1),
+            due_date=date(2026, 1, 31),
+        )
+
+    def _make_mock_sdk(
+        self, pref_status=201, pref_response=None, pay_status=200, pay_response=None
+    ):
+        mock_sdk = MagicMock()
+        mock_sdk.preference.return_value.create.return_value = {
+            "status": pref_status,
+            "response": pref_response
+            or {
+                "id": "pref-abc123",
+                "init_point": "https://www.mercadopago.com.ar/checkout/v1/redirect?pref_id=pref-abc123",
+            },
+        }
+        mock_sdk.payment.return_value.get.return_value = {
+            "status": pay_status,
+            "response": pay_response
+            or {
+                "id": 99999,
+                "status": "approved",
+                "external_reference": "42",
+            },
+        }
+        return mock_sdk
+
+    def test_create_preference_exitosa(self):
+        mock_sdk = self._make_mock_sdk()
+        with patch("gym.services.mercadopago_client._get_sdk", return_value=mock_sdk):
+            result = create_payment_preference(self.member, payment_pk=42)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["preference_id"], "pref-abc123")
+        self.assertIn("mercadopago.com.ar", result["init_point"])
+
+    def test_create_preference_sin_access_token(self):
+        with self.settings(MERCADOPAGO_ACCESS_TOKEN=""):
+            result = create_payment_preference(self.member, payment_pk=42)
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"], "no_access_token")
+
+    def test_create_preference_mp_devuelve_error(self):
+        mock_sdk = self._make_mock_sdk(
+            pref_status=400, pref_response={"message": "bad request"}
+        )
+        with patch("gym.services.mercadopago_client._get_sdk", return_value=mock_sdk):
+            result = create_payment_preference(self.member, payment_pk=42)
+
+        self.assertFalse(result["ok"])
+        self.assertIn("mp_status_400", result["error"])
+
+    def test_get_payment_info_exitosa(self):
+        mock_sdk = self._make_mock_sdk()
+        with patch("gym.services.mercadopago_client._get_sdk", return_value=mock_sdk):
+            result = get_payment_info("99999")
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["status"], "approved")
+        self.assertEqual(result["mp_payment_id"], "99999")
+
+
+class MercadoPagoWebhookTest(TestCase):
+    MP_WEBHOOK_URL = "/api/webhooks/mercadopago/"
+
+    def setUp(self):
+        owner = User.objects.create_user(username="mp_webhook_owner", password="pass")
+        self.tenant = Tenant.objects.create(
+            name="Gym Webhook", owner=owner, admin_phone="5491100000000"
+        )
+        self.plan = SubscriptionPlan.objects.create(
+            tenant=self.tenant,
+            name="Mensual",
+            duration_days=30,
+            price=Decimal("5000.00"),
+        )
+        self.member = Member.objects.create(
+            tenant=self.tenant,
+            first_name="Carlos",
+            last_name="Gomez",
+            phone="5491177777777",
+            current_plan=self.plan,
+            start_date=date(2026, 1, 1),
+            due_date=date(2026, 6, 27),
+        )
+        self.payment = Payment.objects.create(
+            member=self.member,
+            amount=Decimal("5000.00"),
+            provider=Payment.PROVIDER_MP,
+            status=Payment.STATUS_PENDING,
+        )
+
+    def _post(self, payload):
+        return self.client.post(
+            self.MP_WEBHOOK_URL,
+            data=json.dumps(payload),
+            content_type="application/json",
+        )
+
+    def _mock_get_payment(self, status="approved", external_ref=None):
+        return patch(
+            "gym.views.mercadopago_client.get_payment_info",
+            return_value={
+                "ok": True,
+                "status": status,
+                "external_reference": external_ref or str(self.payment.pk),
+                "mp_payment_id": "99999",
+            },
+        )
+
+    @patch(
+        "gym.views.send_whatsapp_message",
+        return_value={"ok": True, "job_id": "job-confirm-1", "data": {}},
+    )
+    def test_pago_aprobado_actualiza_payment_y_due_date(self, mock_send):
+        original_due = self.member.due_date
+        with self._mock_get_payment():
+            resp = self._post({"type": "payment", "data": {"id": "99999"}})
+
+        self.assertEqual(resp.status_code, 200)
+
+        self.payment.refresh_from_db()
+        self.assertEqual(self.payment.status, Payment.STATUS_PAID)
+        self.assertIsNotNone(self.payment.paid_at)
+        self.assertEqual(self.payment.external_id, "99999")
+
+        self.member.refresh_from_db()
+        self.assertEqual(self.member.due_date, original_due + timedelta(days=30))
+        self.assertEqual(self.member.status, Member.STATUS_ACTIVE)
+
+        mock_send.assert_called_once()
+        log = NotificationLog.objects.get(
+            member=self.member, type=NotificationLog.TYPE_PAYMENT_CONFIRMED
+        )
+        self.assertEqual(log.job_id, "job-confirm-1")
+
+    @patch(
+        "gym.views.send_whatsapp_message",
+        return_value={"ok": True, "job_id": "job-confirm-2", "data": {}},
+    )
+    def test_webhook_duplicado_no_renueva_dos_veces(self, mock_send):
+        self.payment.status = Payment.STATUS_PAID
+        self.payment.save()
+        original_due = self.member.due_date
+
+        with self._mock_get_payment():
+            resp = self._post({"type": "payment", "data": {"id": "99999"}})
+
+        self.assertEqual(resp.status_code, 200)
+        self.member.refresh_from_db()
+        self.assertEqual(self.member.due_date, original_due)
+        mock_send.assert_not_called()
+
+    def test_pago_no_aprobado_no_procesa(self):
+        with self._mock_get_payment(status="pending"):
+            resp = self._post({"type": "payment", "data": {"id": "99999"}})
+
+        self.assertEqual(resp.status_code, 200)
+        self.payment.refresh_from_db()
+        self.assertEqual(self.payment.status, Payment.STATUS_PENDING)
+
+    def test_tipo_no_payment_ignorado(self):
+        resp = self._post({"type": "merchant_order", "data": {"id": "99999"}})
+        self.assertEqual(resp.status_code, 200)
+        self.payment.refresh_from_db()
+        self.assertEqual(self.payment.status, Payment.STATUS_PENDING)
+
+    def test_payload_invalido_devuelve_400(self):
+        resp = self.client.post(
+            self.MP_WEBHOOK_URL,
+            data="no-json{",
+            content_type="application/json",
+        )
+        self.assertEqual(resp.status_code, 400)

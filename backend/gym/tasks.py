@@ -3,7 +3,8 @@ import logging
 from celery import shared_task
 from django.utils import timezone
 
-from .models import Member, NotificationLog
+from .models import Member, NotificationLog, Payment
+from .services.mercadopago_client import create_payment_preference
 from .services.whatsapp_client import send_whatsapp_message
 
 logger = logging.getLogger(__name__)
@@ -45,10 +46,39 @@ def check_subscriptions():
 
 def _notify_member(member):
     tenant = member.tenant
-    message = (
-        f"Hola {member.first_name}! Tu cuota en {tenant.name} vence hoy. "
-        f"Proximamente te contactamos para coordinar el pago. Gracias!"
-    )
+    payment_link = ""
+
+    if member.current_plan:
+        payment = Payment.objects.create(
+            member=member,
+            amount=member.current_plan.price,
+            provider=Payment.PROVIDER_MP,
+            status=Payment.STATUS_PENDING,
+        )
+        pref_result = create_payment_preference(member, payment.pk)
+        if pref_result["ok"]:
+            payment.payment_link = pref_result["init_point"]
+            payment.external_id = pref_result["preference_id"]
+            payment.save(update_fields=["payment_link", "external_id"])
+            payment_link = pref_result["init_point"]
+        else:
+            logger.error(
+                "No se pudo generar link de pago para socio pk=%d: %s",
+                member.pk,
+                pref_result.get("error"),
+            )
+
+    if payment_link:
+        message = (
+            f"Hola {member.first_name}! Tu cuota en {tenant.name} vence hoy. "
+            f"Paga aqui: {payment_link}"
+        )
+    else:
+        message = (
+            f"Hola {member.first_name}! Tu cuota en {tenant.name} vence hoy. "
+            f"Proximamente te contactamos para coordinar el pago. Gracias!"
+        )
+
     result = send_whatsapp_message(
         tenant_id=tenant.pk,
         phone=member.phone,
